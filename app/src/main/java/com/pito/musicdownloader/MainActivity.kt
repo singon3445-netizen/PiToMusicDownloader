@@ -105,13 +105,13 @@ private fun MainScreen(context: Context) {
         }
 
         HorizontalDivider()
-        Text("Descarga individual de audio", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text("Descarga individual de archivo multimedia", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
         OutlinedTextField(value = audioTitle, onValueChange = { audioTitle = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Nombre del archivo (opcional)") }, singleLine = true)
-        OutlinedTextField(value = audioUrl, onValueChange = { audioUrl = it }, modifier = Modifier.fillMaxWidth(), label = { Text("URL HTTPS directa del audio") }, placeholder = { Text("Enlace directo a un archivo de audio autorizado") }, singleLine = true)
+        OutlinedTextField(value = audioUrl, onValueChange = { audioUrl = it }, modifier = Modifier.fillMaxWidth(), label = { Text("URL HTTPS directa del archivo") }, placeholder = { Text("Enlace directo a un archivo de audio o vídeo autorizado") }, singleLine = true)
         Button(onClick = {
             try {
                 val url = audioUrl.trim(); val uri = Uri.parse(url)
-                if (uri.scheme != "https" || uri.host.isNullOrBlank() || !URLUtil.isNetworkUrl(url) || uri.host!!.lowercase() in setOf("youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "www.youtu.be")) status = "Introduce una URL HTTPS directa a un archivo autorizado, no una página de YouTube."
+                if (uri.scheme != "https" || uri.host.isNullOrBlank() || !URLUtil.isNetworkUrl(url) || uri.host!!.lowercase() in setOf("youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "www.youtu.be")) status = "Introduce una URL HTTPS directa a un archivo multimedia autorizado, no una página de YouTube."
                 else {
                     val guessed = URLUtil.guessFileName(url, null, null).substringAfterLast("/").ifBlank { "audio.mp3" }
                     val baseName = sanitizeFileName(audioTitle.trim().ifBlank { guessed.substringBeforeLast('.', guessed) })
@@ -122,11 +122,11 @@ private fun MainScreen(context: Context) {
                     status = "Descarga iniciada: Música/PiTo Music Downloader/$safeName"
                 }
             } catch (_: Exception) { status = "No se pudo iniciar la descarga. Comprueba la URL e inténtalo de nuevo." }
-        }, modifier = Modifier.fillMaxWidth()) { Text("Descargar audio individual") }
+        }, modifier = Modifier.fillMaxWidth()) { Text("Descargar archivo individual") }
 
         HorizontalDivider()
         Text("Convertir archivo local a MP3", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        Text("Elige un archivo guardado en el teléfono. La conversión se realiza localmente; no convierte enlaces de YouTube.", style = MaterialTheme.typography.bodySmall)
+        Text("Puedes convertir a MP3 un vídeo descargado y guardado en el teléfono. Primero descarga el archivo multimedia autorizado y luego selecciónalo aquí. La conversión es local; no extrae audio directamente de enlaces de YouTube.", style = MaterialTheme.typography.bodySmall)
         Button(enabled = !conversionBusy, onClick = { pickMedia.launch(arrayOf("audio/*", "video/*")) }, modifier = Modifier.fillMaxWidth()) { Text("Elegir audio o vídeo") }
         Text(sourceAudio?.lastPathSegment ?: "Ningún archivo seleccionado", style = MaterialTheme.typography.bodySmall)
         Button(enabled = sourceAudio != null && !conversionBusy, onClick = {
