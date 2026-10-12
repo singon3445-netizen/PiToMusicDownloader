@@ -1,6 +1,8 @@
 package com.pito.musicdownloader
 
 import android.app.DownloadManager
+import android.content.ContentValues
+import android.provider.MediaStore
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -8,6 +10,8 @@ import android.os.Bundle
 import android.os.Environment
 import android.webkit.URLUtil
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -20,6 +24,9 @@ import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.arthenica.ffmpegkit.FFmpegKit
+import com.arthenica.ffmpegkit.ReturnCode
+import java.io.File
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -38,11 +45,17 @@ private fun MainScreen(context: Context) {
     var link by remember { mutableStateOf("") }
     var apiKey by remember { mutableStateOf("") }
     var audioUrl by remember { mutableStateOf("") }
+    var audioTitle by remember { mutableStateOf("") }
+    var conversionBusy by remember { mutableStateOf(false) }
+    var sourceAudio by remember { mutableStateOf<Uri?>(null) }
     var status by remember { mutableStateOf("Pega un enlace de YouTube para identificar el vídeo o la playlist.") }
     var tracks by remember { mutableStateOf<List<Track>>(emptyList()) }
     var selected by remember { mutableStateOf<Set<String>>(emptySet()) }
     var loading by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val pickMedia = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) { sourceAudio = uri; status = "Archivo seleccionado. Pulsa Convertir a MP3." }
+    }
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("PiTo Music Downloader", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
@@ -92,22 +105,77 @@ private fun MainScreen(context: Context) {
         }
 
         HorizontalDivider()
-        Text("Descargar un archivo de audio autorizado", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-        OutlinedTextField(value = audioUrl, onValueChange = { audioUrl = it }, modifier = Modifier.fillMaxWidth(), label = { Text("URL HTTPS directa del archivo") }, placeholder = { Text("Enlace directo a un archivo de audio") }, singleLine = true)
+        Text("Descarga individual de audio", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        OutlinedTextField(value = audioTitle, onValueChange = { audioTitle = it }, modifier = Modifier.fillMaxWidth(), label = { Text("Nombre del archivo (opcional)") }, singleLine = true)
+        OutlinedTextField(value = audioUrl, onValueChange = { audioUrl = it }, modifier = Modifier.fillMaxWidth(), label = { Text("URL HTTPS directa del audio") }, placeholder = { Text("Enlace directo a un archivo de audio autorizado") }, singleLine = true)
         Button(onClick = {
             try {
                 val url = audioUrl.trim(); val uri = Uri.parse(url)
-                if (uri.scheme != "https" || uri.host.isNullOrBlank() || !URLUtil.isNetworkUrl(url)) status = "Introduce una URL HTTPS directa a un archivo de audio autorizado."
+                if (uri.scheme != "https" || uri.host.isNullOrBlank() || !URLUtil.isNetworkUrl(url) || uri.host!!.lowercase() in setOf("youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be", "www.youtu.be")) status = "Introduce una URL HTTPS directa a un archivo autorizado, no una página de YouTube."
                 else {
-                    val safeName = URLUtil.guessFileName(url, null, "audio/mpeg").substringAfterLast("/").ifBlank { "audio.mp3" }
+                    val guessed = URLUtil.guessFileName(url, null, null).substringAfterLast("/").ifBlank { "audio.mp3" }
+                    val baseName = sanitizeFileName(audioTitle.trim().ifBlank { guessed.substringBeforeLast('.', guessed) })
+                    val extension = guessed.substringAfterLast('.', "mp3").takeIf { it.matches(Regex("[A-Za-z0-9]{2,5}")) } ?: "mp3"
+                    val safeName = "$baseName.$extension"
                     val request = DownloadManager.Request(uri).setTitle(safeName).setDescription("PiTo Music Downloader").setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED).setDestinationInExternalPublicDir(Environment.DIRECTORY_MUSIC, "PiTo Music Downloader/$safeName").setAllowedOverMetered(true).setAllowedOverRoaming(false)
                     (context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
-                    status = "Descarga iniciada. Se guardará en Música/PiTo Music Downloader con el nombre detectado del enlace."
+                    status = "Descarga iniciada: Música/PiTo Music Downloader/$safeName"
                 }
             } catch (_: Exception) { status = "No se pudo iniciar la descarga. Comprueba la URL e inténtalo de nuevo." }
-        }, modifier = Modifier.fillMaxWidth()) { Text("Descargar archivo directo") }
+        }, modifier = Modifier.fillMaxWidth()) { Text("Descargar audio individual") }
+
+        HorizontalDivider()
+        Text("Convertir archivo local a MP3", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Text("Elige un archivo guardado en el teléfono. La conversión se realiza localmente; no convierte enlaces de YouTube.", style = MaterialTheme.typography.bodySmall)
+        Button(enabled = !conversionBusy, onClick = { pickMedia.launch(arrayOf("audio/*", "video/*")) }, modifier = Modifier.fillMaxWidth()) { Text("Elegir audio o vídeo") }
+        Text(sourceAudio?.lastPathSegment ?: "Ningún archivo seleccionado", style = MaterialTheme.typography.bodySmall)
+        Button(enabled = sourceAudio != null && !conversionBusy, onClick = {
+            val inputUri = sourceAudio
+            if (inputUri == null) status = "Primero elige un archivo."
+            else {
+                conversionBusy = true; status = "Convirtiendo a MP3…"
+                scope.launch {
+                    try {
+                        val output = withContext(Dispatchers.IO) {
+                            val inputFile = File(context.cacheDir, "pito_input_${System.currentTimeMillis()}")
+                            context.contentResolver.openInputStream(inputUri).use { input ->
+                                if (input == null) throw IllegalStateException("No se pudo abrir el archivo seleccionado")
+                                inputFile.outputStream().use { outputStream -> input.copyTo(outputStream) }
+                            }
+                            val outputFile = File(context.cacheDir, "pito_${System.currentTimeMillis()}.mp3")
+                            val command = "-y -i '${inputFile.absolutePath}' -vn -codec:a libmp3lame -q:a 2 '${outputFile.absolutePath}'"
+                            val session = FFmpegKit.execute(command)
+                            inputFile.delete()
+                            if (!ReturnCode.isSuccess(session.returnCode) || !outputFile.exists() || outputFile.length() == 0L) {
+                                outputFile.delete()
+                                throw IllegalStateException(session.failStackTrace ?: "Formato no compatible o error de conversión")
+                            }
+                            outputFile
+                        }
+                        withContext(Dispatchers.IO) {
+                            val values = ContentValues().apply {
+                                put(MediaStore.Audio.Media.DISPLAY_NAME, "${sanitizeFileName(audioTitle.ifBlank { "PiTo-convertido" })}.mp3")
+                                put(MediaStore.Audio.Media.MIME_TYPE, "audio/mpeg")
+                                put(MediaStore.Audio.Media.RELATIVE_PATH, "Music/PiTo Music Downloader")
+                            }
+                            val destination = context.contentResolver.insert(MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values) ?: throw IllegalStateException("No se pudo crear el archivo de destino")
+                            try {
+                                context.contentResolver.openOutputStream(destination).use { stream ->
+                                    if (stream == null) throw IllegalStateException("No se pudo guardar el MP3")
+                                    output.inputStream().use { it.copyTo(stream) }
+                                }
+                            } catch (e: Exception) { context.contentResolver.delete(destination, null, null); throw e }
+                            output.delete()
+                        }
+                        status = "Conversión completada. El MP3 está en Música/PiTo Music Downloader."
+                    } catch (e: Exception) {
+                        status = "No se pudo convertir el archivo: ${e.message?.take(180) ?: "error desconocido"}"
+                    } finally { conversionBusy = false }
+                }
+            }
+        }, modifier = Modifier.fillMaxWidth()) { Text(if (conversionBusy) "Convirtiendo…" else "Convertir a MP3") }
         Text(status, style = MaterialTheme.typography.bodyMedium)
-        Text("La API oficial permite consultar metadatos, no descargar ni convertir vídeos de YouTube a MP3. Usa la descarga directa solo con archivos cuya descarga tengas autorizada.", style = MaterialTheme.typography.bodySmall)
+        Text("La API oficial de YouTube permite consultar metadatos, pero no descargar audio de vídeos. Usa descargas directas solo con archivos cuya descarga tengas autorizada.", style = MaterialTheme.typography.bodySmall)
     }
 }
 
@@ -177,3 +245,6 @@ private fun formatDuration(value: String): String {
     val seconds = match.groupValues[3].toIntOrNull() ?: 0
     return if (hours > 0) "%d:%02d:%02d".format(hours, minutes, seconds) else "%d:%02d".format(minutes, seconds)
 }
+
+private fun sanitizeFileName(value: String): String =
+    value.replace(Regex("[^A-Za-z0-9._ -]"), "_").trim().take(100).ifBlank { "audio" }
